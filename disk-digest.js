@@ -231,7 +231,13 @@ async function main() {
   console.log(`   ${matched.length} papers passed relevance check.`);
 
   if (matched.length === 0) {
-    console.log("Nothing to post today. Exiting.");
+    console.log("No relevant papers found. Posting notice to Slack...");
+    const today = new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+    await postToSlack([
+      { type: "header", text: { type: "plain_text", text: `🪐 Protoplanetary Disk Digest — ${today}`, emoji: true } },
+      { type: "section", text: { type: "mrkdwn", text: "_No new relevant papers on arXiv today._" } },
+    ]);
+    console.log("✅ Posted.");
     return;
   }
 
