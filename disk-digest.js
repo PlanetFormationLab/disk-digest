@@ -24,6 +24,8 @@ const DISK_TERMS = [
   "circumplanetary disk",
   "circumplanetary disc",
   "disk-based",
+  "natal disk",
+  "natal disc",
 ];
 
 const CONTEXT_TERMS = [
@@ -66,6 +68,8 @@ const CONTEXT_TERMS = [
   "dust cavity",
   // magnetic fields in disks
   "magnetic field",
+  "accreting protoplanet",
+  "embedded protoplanet",
 ];
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
