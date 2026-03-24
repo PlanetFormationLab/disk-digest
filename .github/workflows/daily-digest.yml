@@ -1,0 +1,38 @@
+name: Daily Disk Digest
+
+on:
+  schedule:
+    # Runs at 18:00 UTC (2pm ET) every weekday — after arXiv's daily submission cutoff
+    # Adjust the time to suit your timezone. Uses standard cron syntax:
+    # ┌─ minute (0-59)
+    # │ ┌─ hour in UTC (0-23)
+    # │ │  ┌─ day of month (1-31)
+    # │ │  │ ┌─ month (1-12)
+    # │ │  │ │ ┌─ day of week (0=Sun, 1=Mon ... 5=Fri)
+    # │ │  │ │ │
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch: # Also allows manual runs from the GitHub Actions tab
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Disk Digest
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node disk-digest.js
