@@ -16,18 +16,23 @@ async function fetchArxivPapers() {
   const res = await fetch(url);
   const xml = await res.text();
 
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+
   const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
-  return entries.map(([, entry]) => {
-    const get = tag => entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? "";
-    const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => m[1].trim());
-    return {
-      id:       get("id"),
-      title:    get("title"),
-      abstract: get("summary"),
-      link:     get("id"),
-      authors,
-    };
-  });
+  return entries
+    .map(([, entry]) => {
+      const get = tag => entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? "";
+      const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => m[1].trim());
+      return {
+        id:        get("id"),
+        title:     get("title"),
+        abstract:  get("summary"),
+        link:      get("id"),
+        published: get("published").slice(0, 10),
+        authors,
+      };
+    })
+    .filter(p => p.published === today);
 }
 
 // Claude relevance check for all fetched papers
@@ -146,7 +151,7 @@ async function main() {
 
   console.log("📡 Fetching arXiv papers...");
   const all = await fetchArxivPapers();
-  console.log(`   ${all.length} total papers fetched.`);
+  console.log(`   ${all.length} papers published today.`);
 
   console.log("🔍 Running Claude relevance check...");
   const matched = [];
