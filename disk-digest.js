@@ -5,73 +5,6 @@
 import fetch from "node-fetch";
 import Anthropic from "@anthropic-ai/sdk";
 
-// ─── KEYWORD FILTERS ─────────────────────────────────────────────────────────
-// A paper must match AT LEAST ONE term from EACH list to pass the pre-filter.
-
-const DISK_TERMS = [
-  "protoplanetary disk",
-  "protoplanetary disc",
-  "proto-planetary disk",
-  "proto-planetary disc",
-  "circumstellar disk",
-  "circumstellar disc",
-  "protostellar disk",
-  "protostellar disc",
-  "planet-forming disk",
-  "planet-forming disc",
-  "circumbinary disk",
-  "circumbinary disc",
-  "circumplanetary disk",
-  "circumplanetary disc",
-  "disk-based",
-  "natal disk",
-  "natal disc",
-];
-
-const CONTEXT_TERMS = [
-  "planet formation",
-  "planet-forming",
-  "T Tauri",
-  "Herbig Ae",
-  "Herbig Be",
-  "young stellar object",
-  "YSO",
-  "dust continuum",
-  "dust emission",
-  "millimeter emission",
-  "submillimeter",
-  "ALMA",
-  "gap opening",
-  "ring structure",
-  "dust trap",
-  "pebble accretion",
-  "DSHARP",
-  "disk substructure",
-  // gas kinematics & dynamics
-  "gas kinematics",
-  "disk kinematics",
-  "velocity perturbation",
-  "non-Keplerian",
-  "planet-disk interaction",
-  "planet-disc interaction",
-  "gravitational instability",
-  "disk warp",
-  // disk chemistry
-  "astrochemistry",
-  "molecular line",
-  "CO isotopologue",
-  "disk chemistry",
-  // disk types & structures
-  "transition disk",
-  "transition disc",
-  "inner cavity",
-  "dust cavity",
-  // magnetic fields in disks
-  "magnetic field",
-  "accreting protoplanet",
-  "embedded protoplanet",
-];
-
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // --- arXiv -------------------------------------------------------------------
@@ -79,7 +12,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // For those that are, run a more in-depth classification using Claude API.
 
 async function fetchArxivPapers() {
-  const url = "https://export.arxiv.org/api/query?search_query=cat:astro-ph.*&sortBy=submittedDate&sortOrder=descending&max_results=100";
+  const url = "https://export.arxiv.org/api/query?search_query=cat:astro-ph.*&sortBy=submittedDate&sortOrder=descending&max_results=300";
   const res = await fetch(url);
   const xml = await res.text();
 
@@ -97,15 +30,7 @@ async function fetchArxivPapers() {
   });
 }
 
-// Stage 1: fast keyword pre-filter (must match one term from each list)
-
-function passesPrefiler(p) {
-  const hay = (p.title + " " + p.abstract).toLowerCase();
-  return DISK_TERMS.some(t => hay.includes(t)) &&
-         CONTEXT_TERMS.some(t => hay.includes(t.toLowerCase()));
-}
-
-// Stage 2: Claude relevance check for papers that passed the pre-filter
+// Claude relevance check for all fetched papers
 
 async function isRelevant(paper) {
   const msg = await anthropic.messages.create({
@@ -221,13 +146,12 @@ async function main() {
 
   console.log("📡 Fetching arXiv papers...");
   const all = await fetchArxivPapers();
-  const preFiltered = all.filter(passesPrefiler);
-  console.log(`   ${all.length} total · ${preFiltered.length} passed keyword pre-filter.`);
+  console.log(`   ${all.length} total papers fetched.`);
 
   console.log("🔍 Running Claude relevance check...");
   const matched = [];
-  for (const [i, paper] of preFiltered.entries()) {
-    process.stdout.write(`   [${i + 1}/${preFiltered.length}] ${paper.title.slice(0, 55)}... `);
+  for (const [i, paper] of all.entries()) {
+    process.stdout.write(`   [${i + 1}/${all.length}] ${paper.title.slice(0, 55)}... `);
     const relevant = await isRelevant(paper);
     console.log(relevant ? "✅ relevant" : "❌ filtered out");
     if (relevant) matched.push(paper);
