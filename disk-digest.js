@@ -12,27 +12,40 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // For those that are, run a more in-depth classification using Claude API.
 
 async function fetchArxivPapers() {
-  const url = "https://export.arxiv.org/api/query?search_query=cat:astro-ph.*&sortBy=submittedDate&sortOrder=descending&max_results=300";
-  const res = await fetch(url);
-  const xml = await res.text();
+  // Fetch the daily new-listings page directly
+  const listRes = await fetch("https://arxiv.org/list/astro-ph/new");
+  const html = await listRes.text();
 
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  // Verify the listing is for today (UTC) before proceeding
+  const now = new Date();
+  const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const todayStr = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
+  if (!html.includes(todayStr)) {
+    console.log(`   ⚠️  arxiv.org/list/astro-ph/new is not yet updated for today (${todayStr}). No papers fetched.`);
+    return [];
+  }
+
+  // Extract all unique arXiv IDs listed on the page
+  const ids = [...new Set([...html.matchAll(/arXiv:(\d{4}\.\d{4,5})/g)].map(m => m[1]))];
+  if (ids.length === 0) return [];
+
+  // Fetch full metadata (titles, abstracts, authors) for all IDs in one API call
+  const apiUrl = `https://export.arxiv.org/api/query?id_list=${ids.join(",")}&max_results=${ids.length}`;
+  const apiRes = await fetch(apiUrl);
+  const xml = await apiRes.text();
 
   const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
-  return entries
-    .map(([, entry]) => {
-      const get = tag => entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? "";
-      const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => m[1].trim());
-      return {
-        id:        get("id"),
-        title:     get("title"),
-        abstract:  get("summary"),
-        link:      get("id"),
-        published: get("published").slice(0, 10),
-        authors,
-      };
-    })
-    .filter(p => p.published === today);
+  return entries.map(([, entry]) => {
+    const get = tag => entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? "";
+    const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => m[1].trim());
+    return {
+      id:       get("id"),
+      title:    get("title"),
+      abstract: get("summary"),
+      link:     get("id"),
+      authors,
+    };
+  });
 }
 
 // Claude relevance check for all fetched papers
@@ -151,7 +164,7 @@ async function main() {
 
   console.log("📡 Fetching arXiv papers...");
   const all = await fetchArxivPapers();
-  console.log(`   ${all.length} papers published today.`);
+  console.log(`   ${all.length} papers found on arxiv.org/list/astro-ph/new.`);
 
   console.log("🔍 Running Claude relevance check...");
   const matched = [];
