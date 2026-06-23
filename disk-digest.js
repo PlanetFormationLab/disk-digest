@@ -52,7 +52,7 @@ async function fetchArxivPapers() {
 
 async function isRelevant(paper) {
   const msg = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-haiku-4-5",
     max_tokens: 10,
     messages: [{
       role: "user",
@@ -132,7 +132,7 @@ async function postToSlack(blocks) {
 
 async function summarise(paper) {
   const msg = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     max_tokens: 1000,
     messages: [{
       role: "user",
