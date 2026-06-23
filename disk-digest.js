@@ -1,11 +1,14 @@
 // disk-digest.js
 // Usage: node disk-digest.js
-// Requires: npm install node-fetch @anthropic-ai/sdk
+// Requires: npm install node-fetch openai
 
 import fetch from "node-fetch";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.PARLEY_API_KEY,
+  baseURL: process.env.PARLEY_BASE_URL,  // e.g. https://parley.mit.edu/v1
+});
 
 // --- arXiv -------------------------------------------------------------------
 // Search arXiv for papers which might be releavant based on the keywords above.
@@ -51,8 +54,8 @@ async function fetchArxivPapers() {
 // Claude relevance check for all fetched papers
 
 async function isRelevant(paper) {
-  const msg = await anthropic.messages.create({
-    model: "claude-haiku-4-5",
+  const msg = await client.chat.completions.create({
+    model: "bedrock/claude-haiku-4-5",  // confirm model ID with Parley docs
     max_tokens: 10,
     messages: [{
       role: "user",
@@ -62,7 +65,7 @@ Title: ${paper.title}
 Abstract: ${paper.abstract}`,
     }],
   });
-  const answer = msg.content.map(c => c.text ?? "").join("").trim().toUpperCase();
+  const answer = (msg.choices[0].message.content ?? "").trim().toUpperCase();
   return answer.startsWith("YES");
 }
 
@@ -131,8 +134,8 @@ async function postToSlack(blocks) {
 // Develop a short summary of the papers ready to post to Slack.
 
 async function summarise(paper) {
-  const msg = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
+  const msg = await client.chat.completions.create({
+    model: "bedrock/claude-sonnet-4-6",  // confirm model ID with Parley docs
     max_tokens: 1000,
     messages: [{
       role: "user",
@@ -149,7 +152,7 @@ Provide:
 Respond ONLY with JSON: {"summary": "...", "bullets": ["...", "..."]}. No markdown fences.`,
     }],
   });
-  const raw = msg.content.map(c => c.text ?? "").join("").replace(/```json|```/g, "").trim();
+  const raw = (msg.choices[0].message.content ?? "").replace(/```json|```/g, "").trim();
   return JSON.parse(raw);
 }
 

@@ -34,5 +34,6 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PARLEY_API_KEY: ${{ secrets.PARLEY_API_KEY }}
+          PARLEY_BASE_URL: ${{ secrets.PARLEY_BASE_URL }}
         run: node disk-digest.js
