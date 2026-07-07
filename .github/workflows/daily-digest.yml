@@ -2,7 +2,8 @@ name: Daily Disk Digest
 
 on:
   schedule:
-    # Runs at 18:00 UTC (2pm ET) every weekday — after arXiv's daily submission cutoff
+    # Runs at 12:00 UTC (8am ET) every weekday — after arXiv's ~00:00 UTC daily announcement.
+    # Note: GitHub scheduled workflows can be delayed by 15-60 minutes at busy times.
     # Adjust the time to suit your timezone. Uses standard cron syntax:
     # ┌─ minute (0-59)
     # │ ┌─ hour in UTC (0-23)
@@ -12,6 +13,9 @@ on:
     # │ │  │ │ │
     - cron: "0 12 * * 1-5"
   workflow_dispatch: # Also allows manual runs from the GitHub Actions tab
+
+permissions:
+  contents: write # to commit posted-ids.json back after each run
 
 jobs:
   digest:
@@ -37,3 +41,15 @@ jobs:
           PARLEY_API_KEY: ${{ secrets.PARLEY_API_KEY }}
           PARLEY_BASE_URL: ${{ secrets.PARLEY_BASE_URL }}
         run: node disk-digest.js
+
+      # Persist the record of already-digested papers so later runs skip them
+      - name: Commit posted-ids.json
+        run: |
+          test -f posted-ids.json || exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted-ids.json
+          git diff --staged --quiet && exit 0
+          git commit -m "Record digested paper IDs"
+          git pull --rebase origin ${{ github.ref_name }}
+          git push

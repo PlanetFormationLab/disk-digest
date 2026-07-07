@@ -1,17 +1,18 @@
 {
   "name": "disk-digest",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
+  "description": "Slack bot that scrapes arXiv astro-ph daily, filters for protoplanetary-disk papers with Claude, and posts a summarized digest.",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node --env-file=.env disk-digest.js",
+    "dry-run": "node --env-file=.env disk-digest.js --dry-run"
   },
-  "keywords": [],
-  "author": "",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "author": "Richard Teague",
   "license": "ISC",
-  "description": "",
   "dependencies": {
-    "node-fetch": "^3.3.2",
     "openai": "^6.44.0"
   }
 }
