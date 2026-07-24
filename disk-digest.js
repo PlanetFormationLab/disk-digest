@@ -80,16 +80,27 @@ async function savePostedIds(ids) {
 // Scrape the daily new-listings page for today's paper IDs, then fetch full
 // metadata for those IDs from the arXiv API. Returns null if the listing page
 // has not been updated for today yet (distinct from "no papers found").
+//
+// arXiv's listing page is served through a multi-layer CDN (Varnish/Google
+// Frontend) and has occasionally been observed to briefly serve a page that
+// matches today's date but has an empty "New submissions" section — a
+// transient cache/origin blip, not a real zero-paper day (weekdays reliably
+// have 70+ new astro-ph submissions). We identify ourselves with a UA per
+// https://arxiv.org/help/robots and retry a few times before trusting a 0.
 
-async function fetchArxivPapers() {
-  const listRes = await withRetry(() => fetch("https://arxiv.org/list/astro-ph/new"));
+const FETCH_HEADERS = { "User-Agent": "disk-digest/1.0 (contact: rteague@mit.edu)" };
+const ZERO_IDS_RETRY_ATTEMPTS = 3;
+const ZERO_IDS_RETRY_DELAY_MS = 15_000;
+
+async function fetchArxivListingIds() {
+  const listRes = await withRetry(() => fetch("https://arxiv.org/list/astro-ph/new", { headers: FETCH_HEADERS }));
   const html = await listRes.text();
 
   // Verify the listing is for today (UTC) before proceeding
   const now = new Date();
   const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   const todayStr = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
-  if (!html.includes(todayStr)) return null;
+  if (!html.includes(todayStr)) return { status: "not-updated" };
 
   // The page lists new submissions, cross-lists, and replacements in that
   // order. Replacements are revised old papers, not new ones — drop them.
@@ -97,11 +108,26 @@ async function fetchArxivPapers() {
 
   // Extract all unique arXiv IDs from the new + cross-list sections
   const ids = [...new Set([...newSection.matchAll(/arXiv:(\d{4}\.\d{4,5})/g)].map(m => m[1]))];
-  if (ids.length === 0) return [];
+  return { status: "ok", ids };
+}
+
+async function fetchArxivPapers() {
+  let ids = [];
+  for (let attempt = 1; attempt <= ZERO_IDS_RETRY_ATTEMPTS; attempt++) {
+    const result = await fetchArxivListingIds();
+    if (result.status === "not-updated") return null;
+    ids = result.ids;
+    if (ids.length > 0) break;
+    if (attempt < ZERO_IDS_RETRY_ATTEMPTS) {
+      console.log(`   ⚠️  Listing page matched today's date but had 0 papers (attempt ${attempt}/${ZERO_IDS_RETRY_ATTEMPTS}) — retrying in ${ZERO_IDS_RETRY_DELAY_MS / 1000}s in case of a transient CDN/origin blip...`);
+      await new Promise(r => setTimeout(r, ZERO_IDS_RETRY_DELAY_MS));
+    }
+  }
+  if (ids.length === 0) return { suspiciousZero: true };
 
   // Fetch full metadata (titles, abstracts, authors) for all IDs in one API call
   const apiUrl = `https://export.arxiv.org/api/query?id_list=${ids.join(",")}&max_results=${ids.length}`;
-  const apiRes = await withRetry(() => fetch(apiUrl));
+  const apiRes = await withRetry(() => fetch(apiUrl, { headers: FETCH_HEADERS }));
   const xml = await apiRes.text();
 
   const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
@@ -271,6 +297,21 @@ async function main() {
   const fetched = await fetchArxivPapers();
   if (fetched === null) {
     console.log("   ⚠️  arxiv.org/list/astro-ph/new is not yet updated for today. Nothing to do.");
+    return;
+  }
+  if (fetched.suspiciousZero) {
+    // The listing page matched today's date but had an empty "New submissions"
+    // section even after retries — weekdays reliably have 70+ new astro-ph
+    // papers, so this almost certainly means arXiv/its CDN served a broken or
+    // stale page rather than a real zero-paper day. Surface that distinctly
+    // instead of silently posting the calm "no relevant papers" notice, which
+    // would look identical to a genuinely quiet day.
+    console.log("   ❌ Still 0 papers after retries — this looks like a scrape failure, not a real zero-paper day.");
+    await postToSlack([
+      { type: "header", text: { type: "plain_text", text: "🪐 Protoplanetary Disk Digest — scrape failed", emoji: true } },
+      { type: "section", text: { type: "mrkdwn",
+        text: "_arxiv.org/list/astro-ph/new matched today's date but returned 0 papers, even after retries. This is very unlikely to be a real zero-paper day — the scrape probably hit a transient arXiv/CDN issue. No papers were recorded as checked, so a manual re-run today (workflow_dispatch) should pick them up — tomorrow's run will only see tomorrow's listing, not today's._" } },
+    ]);
     return;
   }
   console.log(`   ${fetched.length} papers found on arxiv.org/list/astro-ph/new.`);
