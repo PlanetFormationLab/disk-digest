@@ -81,16 +81,17 @@ async function savePostedIds(ids) {
 // metadata for those IDs from the arXiv API. Returns null if the listing page
 // has not been updated for today yet (distinct from "no papers found").
 //
-// arXiv's listing page is served through a multi-layer CDN (Varnish/Google
-// Frontend) and has occasionally been observed to briefly serve a page that
-// matches today's date but has an empty "New submissions" section — a
-// transient cache/origin blip, not a real zero-paper day (weekdays reliably
-// have 70+ new astro-ph submissions). We identify ourselves with a UA per
-// https://arxiv.org/help/robots and retry a few times before trusting a 0.
+// Both arxiv.org (the listing page) and export.arxiv.org (the metadata API)
+// are served through their own CDN/origin layers and have each independently
+// been observed to briefly return an empty result on an otherwise-valid
+// request — a transient cache/origin blip, not a real zero-paper day
+// (weekdays reliably have 70+ new astro-ph submissions). We identify
+// ourselves with a UA per https://arxiv.org/help/robots and retry a few
+// times on either stage before trusting a 0.
 
 const FETCH_HEADERS = { "User-Agent": "disk-digest/1.0 (contact: rteague@mit.edu)" };
-const ZERO_IDS_RETRY_ATTEMPTS = 3;
-const ZERO_IDS_RETRY_DELAY_MS = 15_000;
+const SUSPICIOUS_ZERO_RETRY_ATTEMPTS = 3;
+const SUSPICIOUS_ZERO_RETRY_DELAY_MS = 15_000;
 
 async function fetchArxivListingIds() {
   const listRes = await withRetry(() => fetch("https://arxiv.org/list/astro-ph/new", { headers: FETCH_HEADERS }));
@@ -113,24 +114,35 @@ async function fetchArxivListingIds() {
 
 async function fetchArxivPapers() {
   let ids = [];
-  for (let attempt = 1; attempt <= ZERO_IDS_RETRY_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= SUSPICIOUS_ZERO_RETRY_ATTEMPTS; attempt++) {
     const result = await fetchArxivListingIds();
     if (result.status === "not-updated") return null;
     ids = result.ids;
     if (ids.length > 0) break;
-    if (attempt < ZERO_IDS_RETRY_ATTEMPTS) {
-      console.log(`   ⚠️  Listing page matched today's date but had 0 papers (attempt ${attempt}/${ZERO_IDS_RETRY_ATTEMPTS}) — retrying in ${ZERO_IDS_RETRY_DELAY_MS / 1000}s in case of a transient CDN/origin blip...`);
-      await new Promise(r => setTimeout(r, ZERO_IDS_RETRY_DELAY_MS));
+    if (attempt < SUSPICIOUS_ZERO_RETRY_ATTEMPTS) {
+      console.log(`   ⚠️  Listing page matched today's date but had 0 papers (attempt ${attempt}/${SUSPICIOUS_ZERO_RETRY_ATTEMPTS}) — retrying in ${SUSPICIOUS_ZERO_RETRY_DELAY_MS / 1000}s in case of a transient CDN/origin blip...`);
+      await new Promise(r => setTimeout(r, SUSPICIOUS_ZERO_RETRY_DELAY_MS));
     }
   }
   if (ids.length === 0) return { suspiciousZero: true };
 
-  // Fetch full metadata (titles, abstracts, authors) for all IDs in one API call
-  const apiUrl = `https://export.arxiv.org/api/query?id_list=${ids.join(",")}&max_results=${ids.length}`;
-  const apiRes = await withRetry(() => fetch(apiUrl, { headers: FETCH_HEADERS }));
-  const xml = await apiRes.text();
+  // Fetch full metadata (titles, abstracts, authors) for all IDs in one API call.
+  // export.arxiv.org is a separate origin from the listing page above, so it can
+  // independently return a transient empty result even when the listing succeeded.
+  let entries = [];
+  for (let attempt = 1; attempt <= SUSPICIOUS_ZERO_RETRY_ATTEMPTS; attempt++) {
+    const apiUrl = `https://export.arxiv.org/api/query?id_list=${ids.join(",")}&max_results=${ids.length}`;
+    const apiRes = await withRetry(() => fetch(apiUrl, { headers: FETCH_HEADERS }));
+    const xml = await apiRes.text();
+    entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
+    if (entries.length > 0) break;
+    if (attempt < SUSPICIOUS_ZERO_RETRY_ATTEMPTS) {
+      console.log(`   ⚠️  export.arxiv.org metadata query returned 0 entries for ${ids.length} known IDs (attempt ${attempt}/${SUSPICIOUS_ZERO_RETRY_ATTEMPTS}) — retrying in ${SUSPICIOUS_ZERO_RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(r => setTimeout(r, SUSPICIOUS_ZERO_RETRY_DELAY_MS));
+    }
+  }
+  if (entries.length === 0) return { suspiciousZero: true };
 
-  const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
   return entries.map(([, entry]) => {
     const get = tag => decodeEntities(
       entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? ""
