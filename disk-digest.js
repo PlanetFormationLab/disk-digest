@@ -77,24 +77,75 @@ async function savePostedIds(ids) {
 }
 
 // --- arXiv -------------------------------------------------------------------
-// Scrape the daily new-listings page for today's paper IDs, then fetch full
-// metadata for those IDs from the arXiv API. Returns null if the listing page
-// has not been updated for today yet (distinct from "no papers found").
+// Scrape the daily new-listings page for today's papers. The listing already
+// carries everything the digest needs — title, authors and the full abstract —
+// so it is the single source of truth. Returns null if the page has not been
+// updated for today yet (distinct from "no papers found").
 //
-// Both arxiv.org (the listing page) and export.arxiv.org (the metadata API)
-// are served through their own CDN/origin layers and have each independently
-// been observed to briefly return an empty result on an otherwise-valid
-// request — a transient cache/origin blip, not a real zero-paper day
-// (weekdays reliably have 70+ new astro-ph submissions). We identify
-// ourselves with a UA per https://arxiv.org/help/robots and retry a few
-// times on either stage before trusting a 0.
+// This deliberately avoids the export.arxiv.org metadata API. That call was a
+// second, independent origin that could fail on its own, and from September
+// 2026 it began returning non-XML error responses to GitHub Actions runners
+// while the same request succeeded elsewhere — an IP-level block that stalled
+// the digest for days. One origin, one failure mode.
+//
+// arxiv.org has still been observed to briefly serve an empty listing on an
+// otherwise-valid request (a transient cache/origin blip, not a real
+// zero-paper day — weekdays reliably have 70+ new astro-ph submissions), so we
+// identify ourselves with a UA per https://arxiv.org/help/robots and retry a
+// few times before trusting a 0.
 
+const ARXIV_LISTING_URL = "https://arxiv.org/list/astro-ph/new";
 const FETCH_HEADERS = { "User-Agent": "disk-digest/1.0 (contact: rteague@mit.edu)" };
 const SUSPICIOUS_ZERO_RETRY_ATTEMPTS = 3;
 const SUSPICIOUS_ZERO_RETRY_DELAY_MS = 15_000;
 
-async function fetchArxivListingIds() {
-  const listRes = await withRetry(() => fetch("https://arxiv.org/list/astro-ph/new", { headers: FETCH_HEADERS }));
+// fetch() resolves rather than throws on 4xx/5xx, so an error page would
+// otherwise flow on as "valid HTML that happens to contain no papers" and be
+// indistinguishable from a quiet day. Throw instead, with enough of the body
+// to identify a block or challenge page in the CI log.
+async function fetchOk(url) {
+  const res = await fetch(url, { headers: FETCH_HEADERS });
+  if (!res.ok) {
+    const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
+    throw new Error(`HTTP ${res.status} ${res.statusText} from ${new URL(url).host} — ${body}`);
+  }
+  return res;
+}
+
+function stripTags(html) {
+  return decodeEntities(html.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+// Each listing entry is a <dt> (the arXiv ID and download links) paired with a
+// <dd> (title, authors, subjects, abstract). Parsing the pairs — rather than
+// regexing IDs out of the whole page — also drops stray arXiv IDs that appear
+// as citations inside other papers' abstracts.
+function parseListingEntries(sectionHtml) {
+  const items = [...sectionHtml.matchAll(/<dt>([\s\S]*?)<\/dt>\s*<dd>([\s\S]*?)<\/dd>/g)];
+  const papers = [];
+  for (const [, dt, dd] of items) {
+    const arxivId = dt.match(/arXiv:(\d{4}\.\d{4,5})/)?.[1];
+    if (!arxivId) continue;
+
+    const title = stripTags(dd.match(/class=['"]list-title[^'"]*['"][^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "")
+      .replace(/^Title:\s*/, "");
+    const authorsHtml = dd.match(/class=['"]list-authors['"][^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
+    const authors = [...authorsHtml.matchAll(/<a[^>]*>([\s\S]*?)<\/a>/g)].map(m => stripTags(m[1]));
+    const abstract = stripTags(dd.match(/<p class=['"]mathjax['"]>([\s\S]*?)<\/p>/)?.[1] ?? "");
+
+    // A malformed entry is skipped rather than aborting the whole digest, but
+    // it is logged so a silent page-layout change cannot erode coverage.
+    if (!title || !abstract) {
+      console.log(`   ⚠️  Skipping ${arxivId} — could not parse ${!title ? "title" : "abstract"} from the listing page.`);
+      continue;
+    }
+    papers.push({ arxivId, title, abstract, authors, link: `https://arxiv.org/abs/${arxivId}` });
+  }
+  return papers;
+}
+
+async function fetchArxivListing() {
+  const listRes = await withRetry(() => fetchOk(ARXIV_LISTING_URL));
   const html = await listRes.text();
 
   // Verify the listing is for today (UTC) before proceeding
@@ -107,56 +158,23 @@ async function fetchArxivListingIds() {
   // order. Replacements are revised old papers, not new ones — drop them.
   const newSection = html.split(/Replacement submissions/i)[0];
 
-  // Extract all unique arXiv IDs from the new + cross-list sections
-  const ids = [...new Set([...newSection.matchAll(/arXiv:(\d{4}\.\d{4,5})/g)].map(m => m[1]))];
-  return { status: "ok", ids };
+  return { status: "ok", papers: parseListingEntries(newSection) };
 }
 
 async function fetchArxivPapers() {
-  let ids = [];
+  let papers = [];
   for (let attempt = 1; attempt <= SUSPICIOUS_ZERO_RETRY_ATTEMPTS; attempt++) {
-    const result = await fetchArxivListingIds();
+    const result = await fetchArxivListing();
     if (result.status === "not-updated") return null;
-    ids = result.ids;
-    if (ids.length > 0) break;
+    papers = result.papers;
+    if (papers.length > 0) break;
     if (attempt < SUSPICIOUS_ZERO_RETRY_ATTEMPTS) {
       console.log(`   ⚠️  Listing page matched today's date but had 0 papers (attempt ${attempt}/${SUSPICIOUS_ZERO_RETRY_ATTEMPTS}) — retrying in ${SUSPICIOUS_ZERO_RETRY_DELAY_MS / 1000}s in case of a transient CDN/origin blip...`);
       await new Promise(r => setTimeout(r, SUSPICIOUS_ZERO_RETRY_DELAY_MS));
     }
   }
-  if (ids.length === 0) return { suspiciousZero: true };
-
-  // Fetch full metadata (titles, abstracts, authors) for all IDs in one API call.
-  // export.arxiv.org is a separate origin from the listing page above, so it can
-  // independently return a transient empty result even when the listing succeeded.
-  let entries = [];
-  for (let attempt = 1; attempt <= SUSPICIOUS_ZERO_RETRY_ATTEMPTS; attempt++) {
-    const apiUrl = `https://export.arxiv.org/api/query?id_list=${ids.join(",")}&max_results=${ids.length}`;
-    const apiRes = await withRetry(() => fetch(apiUrl, { headers: FETCH_HEADERS }));
-    const xml = await apiRes.text();
-    entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
-    if (entries.length > 0) break;
-    if (attempt < SUSPICIOUS_ZERO_RETRY_ATTEMPTS) {
-      console.log(`   ⚠️  export.arxiv.org metadata query returned 0 entries for ${ids.length} known IDs (attempt ${attempt}/${SUSPICIOUS_ZERO_RETRY_ATTEMPTS}) — retrying in ${SUSPICIOUS_ZERO_RETRY_DELAY_MS / 1000}s...`);
-      await new Promise(r => setTimeout(r, SUSPICIOUS_ZERO_RETRY_DELAY_MS));
-    }
-  }
-  if (entries.length === 0) return { suspiciousZero: true };
-
-  return entries.map(([, entry]) => {
-    const get = tag => decodeEntities(
-      entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`))?.[1]?.replace(/\s+/g, " ").trim() ?? ""
-    );
-    const authors = [...entry.matchAll(/<name>([\s\S]*?)<\/name>/g)].map(m => decodeEntities(m[1].trim()));
-    return {
-      id:       get("id"),
-      arxivId:  get("id").match(/(\d{4}\.\d{4,5})/)?.[1] ?? get("id"),
-      title:    get("title"),
-      abstract: get("summary"),
-      link:     get("id").replace(/^http:/, "https:"),
-      authors,
-    };
-  });
+  if (papers.length === 0) return { suspiciousZero: true };
+  return papers;
 }
 
 // --- Claude relevance check ----------------------------------------------------
@@ -296,6 +314,18 @@ Respond ONLY with JSON: {"summary": "...", "bullets": ["...", "..."]}. No markdo
   return JSON.parse(raw);
 }
 
+// Both a suspicious zero and an outright fetch failure post this, so a broken
+// run is never mistaken for a genuinely quiet day. No papers are recorded as
+// checked in either case, so a same-day manual re-run (workflow_dispatch) will
+// still pick them up — tomorrow's run only ever sees tomorrow's listing.
+function scrapeFailedBlocks(detail) {
+  return [
+    { type: "header", text: { type: "plain_text", text: "🪐 Protoplanetary Disk Digest — scrape failed", emoji: true } },
+    { type: "section", text: { type: "mrkdwn",
+      text: `_${detail} Nothing was recorded as checked, so a manual re-run today (workflow_dispatch) should pick these papers up._` } },
+  ];
+}
+
 // --- Main --------------------------------------------------------------------
 
 async function main() {
@@ -306,7 +336,17 @@ async function main() {
   console.log(`   ${members.length} human members found.`);
 
   console.log("📡 Fetching arXiv papers...");
-  const fetched = await fetchArxivPapers();
+  let fetched;
+  try {
+    fetched = await fetchArxivPapers();
+  } catch (err) {
+    // A hard fetch failure (block, challenge page, DNS, timeout) must be as
+    // loud as a suspicious zero — the 2026 outages were invisible precisely
+    // because a broken fetch looked like a quiet day.
+    console.error(`   ❌ arXiv fetch failed outright: ${err.message}`);
+    await postToSlack(scrapeFailedBlocks(`The digest could not reach arxiv.org: \`${err.message}\``));
+    process.exit(1);
+  }
   if (fetched === null) {
     console.log("   ⚠️  arxiv.org/list/astro-ph/new is not yet updated for today. Nothing to do.");
     return;
@@ -319,12 +359,10 @@ async function main() {
     // instead of silently posting the calm "no relevant papers" notice, which
     // would look identical to a genuinely quiet day.
     console.log("   ❌ Still 0 papers after retries — this looks like a scrape failure, not a real zero-paper day.");
-    await postToSlack([
-      { type: "header", text: { type: "plain_text", text: "🪐 Protoplanetary Disk Digest — scrape failed", emoji: true } },
-      { type: "section", text: { type: "mrkdwn",
-        text: "_arxiv.org/list/astro-ph/new matched today's date but returned 0 papers, even after retries. This is very unlikely to be a real zero-paper day — the scrape probably hit a transient arXiv/CDN issue. No papers were recorded as checked, so a manual re-run today (workflow_dispatch) should pick them up — tomorrow's run will only see tomorrow's listing, not today's._" } },
-    ]);
-    return;
+    await postToSlack(scrapeFailedBlocks(
+      "arxiv.org/list/astro-ph/new matched today's date but yielded 0 papers, even after retries. This is very unlikely to be a real zero-paper day — the scrape probably hit a transient arXiv/CDN issue."
+    ));
+    process.exit(1);
   }
   console.log(`   ${fetched.length} papers found on arxiv.org/list/astro-ph/new.`);
 
