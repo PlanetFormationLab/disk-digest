@@ -15,7 +15,7 @@ on:
   workflow_dispatch: # Also allows manual runs from the GitHub Actions tab
     inputs:
       debug_fetch:
-        description: "Diagnostic only: fetch arxiv.org/list/astro-ph/new and print status/length instead of running the digest"
+        description: "Diagnostic only: run the arXiv scrape (transport, date gate, entry parse) and print what the digest would see, without posting"
         type: boolean
         default: false
 
@@ -41,27 +41,10 @@ jobs:
 
       - name: Debug arXiv fetch
         if: ${{ inputs.debug_fetch }}
-        run: |
-          node -e '
-          fetch("https://arxiv.org/list/astro-ph/new").then(async res => {
-            console.log("status:", res.status);
-            for (const [k, v] of res.headers.entries()) console.log(k + ":", v);
-            const html = await res.text();
-            console.log("html length:", html.length);
-            const now = new Date();
-            const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-            const todayStr = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
-            console.log("todayStr:", todayStr, "included:", html.includes(todayStr));
-            const newSection = html.split(/Replacement submissions/i)[0];
-            console.log("newSection length:", newSection.length);
-            const ids = [...new Set([...newSection.matchAll(/arXiv:(\d{4}\.\d{4,5})/g)].map(m => m[1]))];
-            console.log("ids found:", ids.length);
-            const h3 = [...html.matchAll(/<h3>([^<]*)<\/h3>/g)].map(m => m[1]);
-            console.log("h3 headings:", JSON.stringify(h3));
-            console.log("--- first 500 chars ---");
-            console.log(html.slice(0, 500));
-          }).catch(err => { console.error("fetch failed:", err); process.exit(1); });
-          '
+        # Runs the digest's own scrape path (same parser, same URL) and reports
+        # where it breaks. Deliberately gets no secrets — it posts nothing and
+        # touches no API but arxiv.org.
+        run: node disk-digest.js --debug-fetch
 
       - name: Run Disk Digest
         if: ${{ !inputs.debug_fetch }}

@@ -1,11 +1,14 @@
 // disk-digest.js
 // Usage: npm start  (or: node --env-file=.env disk-digest.js)
 // Pass --dry-run to print the digest to stdout instead of posting to Slack.
+// Pass --debug-fetch to print arXiv scrape diagnostics and exit (no credentials
+// needed, nothing posted) — see debugFetch() below.
 
 import { readFile, writeFile } from "node:fs/promises";
 import OpenAI from "openai";
 
 const DRY_RUN = process.argv.includes("--dry-run");
+const DEBUG_FETCH = process.argv.includes("--debug-fetch");
 
 // Papers already digested are recorded here (arXiv ID -> date first seen) so
 // cross-listings and holiday backlogs don't produce duplicate posts.
@@ -22,8 +25,10 @@ const RESEARCH_TOPICS =
   "protoplanetary disks, planet formation, or the use of circumstellar disks " +
   "to characterize young stars (e.g. disk-based stellar masses, pre-main sequence evolution)";
 
+// --debug-fetch only scrapes arXiv, so it deliberately runs without credentials
+// — that keeps the diagnostic usable from any checkout, secrets or not.
 const REQUIRED_ENV = ["PARLEY_API_KEY", "PARLEY_BASE_URL", "SLACK_BOT_TOKEN", "SLACK_CHANNEL_ID"];
-const missing = REQUIRED_ENV.filter(k => !process.env[k]);
+const missing = DEBUG_FETCH ? [] : REQUIRED_ENV.filter(k => !process.env[k]);
 if (missing.length > 0) {
   console.error(`❌ Missing environment variable(s): ${missing.join(", ")}`);
   console.error("   Copy .env.example to .env and fill in your credentials,");
@@ -31,10 +36,13 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-const client = new OpenAI({
+// Constructed on first use rather than at import, so --debug-fetch never needs
+// a Parley key just to reach the scrape.
+let _client;
+const claude = () => (_client ??= new OpenAI({
   apiKey: process.env.PARLEY_API_KEY,
   baseURL: process.env.PARLEY_BASE_URL,  // e.g. https://parley.mit.edu/v1
-});
+}));
 
 // --- Helpers -----------------------------------------------------------------
 
@@ -180,7 +188,7 @@ async function fetchArxivPapers() {
 // --- Claude relevance check ----------------------------------------------------
 
 async function isRelevant(paper) {
-  const msg = await withRetry(() => client.chat.completions.create({
+  const msg = await withRetry(() => claude().chat.completions.create({
     model: RELEVANCE_MODEL,
     max_tokens: 10,
     temperature: 0,
@@ -292,7 +300,7 @@ async function postToSlack(blocks) {
 // --- Claude summaries ----------------------------------------------------------
 
 async function summarise(paper) {
-  const msg = await withRetry(() => client.chat.completions.create({
+  const msg = await withRetry(() => claude().chat.completions.create({
     model: SUMMARY_MODEL,
     max_tokens: 1000,
     messages: [{
@@ -326,9 +334,66 @@ function scrapeFailedBlocks(detail) {
   ];
 }
 
+// --- Fetch diagnostics -------------------------------------------------------
+// `node disk-digest.js --debug-fetch` (also a workflow_dispatch input). Runs the
+// real scrape path and reports where it breaks, without posting anything.
+//
+// The previous version of this only fetched the listing page and counted ID
+// regex matches, so it would have come back clean during the 9/14 outage — the
+// break was downstream of anything it looked at. It now walks the whole chain
+// (transport -> date gate -> section split -> entry parse) and reports the same
+// numbers the digest itself would compute, via the same parseListingEntries().
+
+async function debugFetch() {
+  console.log(`🔎 arXiv fetch diagnostics — ${new Date().toISOString()}\n`);
+
+  // Raw fetch, not fetchOk(): on a block or challenge page the status, headers
+  // and body ARE the diagnosis, so report them rather than throwing.
+  const res = await fetch(ARXIV_LISTING_URL, { headers: FETCH_HEADERS });
+  console.log(`URL:    ${ARXIV_LISTING_URL}`);
+  console.log(`status: ${res.status} ${res.statusText}${res.ok ? "" : "   ← non-2xx: the digest would now fail loudly here"}`);
+  // A block usually announces itself in the edge/CDN headers rather than the body.
+  for (const h of ["content-type", "content-length", "server", "age", "via", "cf-ray", "cf-mitigated", "x-cache", "retry-after"]) {
+    if (res.headers.has(h)) console.log(`   ${h}: ${res.headers.get(h)}`);
+  }
+
+  const html = await res.text();
+  console.log(`body:   ${html.length} bytes`);
+
+  const now = new Date();
+  const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const todayStr = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
+  const isToday = html.includes(todayStr);
+  console.log(`\ntoday (UTC): "${todayStr}" present: ${isToday}${isToday ? "" : "   ← digest would exit as \"not yet updated\""}`);
+  console.log(`headings: ${JSON.stringify([...html.matchAll(/<h3>([^<]*)<\/h3>/g)].map(m => m[1].trim()))}`);
+
+  const newSection = html.split(/Replacement submissions/i)[0];
+  console.log(`new+cross section: ${newSection.length} bytes of ${html.length}`);
+
+  // Raw <dt>/<dd> pair count vs successfully parsed papers. A gap between these
+  // two means the page markup changed and entries are being silently dropped.
+  const pairs = [...newSection.matchAll(/<dt>([\s\S]*?)<\/dt>\s*<dd>([\s\S]*?)<\/dd>/g)].length;
+  const papers = parseListingEntries(newSection);
+  console.log(`\n<dt>/<dd> pairs:  ${pairs}`);
+  console.log(`papers parsed:    ${papers.length}${papers.length === pairs ? "  ✅ all pairs parsed" : `  ⚠️  ${pairs - papers.length} dropped — see warnings above`}`);
+  console.log(`missing authors:  ${papers.filter(p => p.authors.length === 0).length}`);
+
+  if (papers.length > 0) {
+    const p = papers[0];
+    console.log(`\nfirst entry:\n   id:       ${p.arxivId}\n   title:    ${p.title.slice(0, 90)}\n   authors:  ${p.authors.slice(0, 4).join(", ")}${p.authors.length > 4 ? ` (+${p.authors.length - 4})` : ""}\n   abstract: ${p.abstract.length} chars — ${JSON.stringify(p.abstract.slice(0, 70))}`);
+    const verdict = isToday ? "✅ scrape healthy — the digest would proceed with these papers." : "⚠️  parsed fine, but the date gate would stop the run.";
+    console.log(`\n${verdict}`);
+  } else {
+    console.log(`\n❌ No papers parsed — the digest would post the scrape-failed notice.`);
+    console.log(`--- first 800 chars of body ---\n${html.slice(0, 800)}`);
+  }
+}
+
 // --- Main --------------------------------------------------------------------
 
 async function main() {
+  if (DEBUG_FETCH) return debugFetch();
+
   console.log(`🪐 Disk Digest starting...${DRY_RUN ? " (dry run — nothing will be posted)" : ""}\n`);
 
   console.log("👥 Fetching channel members...");

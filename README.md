@@ -55,6 +55,13 @@ The repo ships with [.github/workflows/daily-digest.yml](.github/workflows/daily
 
 To test without posting to Slack, use `npm run dry-run` — the digest is printed to stdout instead.
 
+If the digest reports a scrape failure, run `node disk-digest.js --debug-fetch` to see where the
+arXiv scrape breaks — it walks the same path the digest does (HTTP status and CDN headers, the
+today's-date gate, the section split, then the entry parse) and prints what the digest would
+have seen. It needs no credentials and posts nothing, and is also available as the
+`debug_fetch` input on the GitHub Actions workflow for diagnosing failures that only reproduce
+from CI.
+
 To run daily via cron, open your crontab with `crontab -e` and add:
 
 ```
