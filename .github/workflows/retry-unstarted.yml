@@ -1,0 +1,43 @@
+name: Retry Unstarted Digest
+
+# GitHub occasionally fails to assign a hosted runner to a queued job ("The job
+# was not acquired by Runner of type hosted even after multiple attempts"). The
+# run then fails after ~15 minutes having executed nothing — no scrape, no Slack
+# post — and since the arXiv listing only ever shows the current day, that day's
+# digest is lost unless the run is retried before the next announcement (as
+# happened on 2026-10-05).
+#
+# This re-runs the digest only for that specific failure: a job that finished
+# without ever getting a runner (runner_id 0) or executing a step. Real failures
+# (a scrape-failed exit, a Slack or Parley error) already announce themselves in
+# Slack and are left alone, since blindly retrying those could double-post.
+
+on:
+  workflow_run:
+    workflows: ["Daily Disk Digest"]
+    types: [completed]
+
+permissions:
+  actions: write # to re-run the failed digest
+
+jobs:
+  retry:
+    # Cap the attempts so a prolonged runner outage can't loop forever.
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Re-run if the digest never got a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          unstarted=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" \
+            --jq '[.jobs[] | select(.runner_id == 0 and (.steps | length) == 0)] | length')
+          if [ "$unstarted" -eq 0 ]; then
+            echo "Run $RUN_ID (attempt $ATTEMPT) failed after starting — not a runner-acquisition failure, leaving it alone."
+            exit 0
+          fi
+          echo "Run $RUN_ID (attempt $ATTEMPT) had $unstarted job(s) that never got a runner — re-running."
+          gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"

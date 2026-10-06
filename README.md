@@ -44,6 +44,8 @@ The repo ships with [.github/workflows/daily-digest.yml](.github/workflows/daily
 2. In your repo go to **Settings → Secrets and variables → Actions** and add four repository secrets: `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`, `PARLEY_API_KEY`, `PARLEY_BASE_URL`.
 3. That's it. The workflow runs at 12:00 UTC on weekdays; adjust the `cron:` line to taste. You can also trigger a run manually from the **Actions** tab (`workflow_dispatch`).
 
+   If GitHub fails to assign a runner to a scheduled run (it fails after ~15 minutes with "The job was not acquired by Runner of type hosted"), [retry-unstarted.yml](.github/workflows/retry-unstarted.yml) re-runs it automatically, up to two more times. Runs that started and then failed are left alone.
+
 ### Option B: Run locally
 
 1. Clone the repo and run `npm install`.
